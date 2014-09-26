@@ -1,7 +1,7 @@
 module CSP
 
 import Base: Condition, open, close, send, recv, map,
-             reduce, filter, merge, select
+             eltype, join_eltype, reduce, filter, merge, select
 
 export Channel, Transport, ChannelClosedError, open, close, send, recv
 
@@ -22,13 +22,15 @@ Channel(T::Type=Any, bufsize=0) =
 open(c::Channel) = c.isopen = true
 close(c::Channel) = c.isopen = false
 isopen(c::Channel) = c.isopen
+bufsize(c::Channel) = c.bufsize
+eltype{T}(c::Channel{T}) = T
 
 function send(c::Channel, val)
     if !isopen(c)
         throw(ChannelClosedError())
     end
 
-    if length(c.buffer) < c.bufsize
+    if length(c.buffer) < bufsize(c)
         push!(c.buffer, val)
         notify(c.recv_blocker, all=false)
     else
@@ -70,26 +72,25 @@ end
 
 typealias Selected{T} (Channel{T}, T)
 
-function select(chans)
-    out = Channel(Selected)
+function select(chans; bufsize=0)
+    out = Channel(Selected, bufsize)
     for c in chans
 	@async send(out, recv(c))
     end
     out
 end
 
-function map(f::Base.Callable, inp::Channel)
-    v = recv(inp)
-    out = Channel(typeof(v))
+function map(f::Base.Callable, inp::Channel; typ=eltype(inp), bufsize=bufsize(inp))
     send(out, v)
     @async while true
+        out = Channel(typ, bufsize=bufsize)
         send(out, f(recv(inp)))
     end
     out
 end
 
-function reduce{T}(f::Base.Callable, v0::T, inp::Channel)
-    out = Channel(T)
+function reduce{T}(f::Base.Callable, v0::T, inp::Channel; bufsize=bufsize(inp))
+    out = Channel(T, bufsize)
     store = v0
     @async while true
         send(out, f(store, recv(inp)))
@@ -97,8 +98,8 @@ function reduce{T}(f::Base.Callable, v0::T, inp::Channel)
     out
 end
 
-function filter{T}(pred::Function, inp::Channel{T})
-    out = Channel(T)
+function filter{T}(pred::Function, inp::Channel{T}; bufsize=bufsize(inp))
+    out = Channel(T, bufsize)
     @async while true
         v = recv(inp)
         if pred(v)
@@ -108,8 +109,12 @@ function filter{T}(pred::Function, inp::Channel{T})
     out
 end
 
-merge(chans...) =
-   map(x -> x[2], select(chans))
+merge(
+        chans...;
+        typ=reduce(join_eltype, map(eltype, chans)),
+        bufsize=max(map(bufsize, chans)...)
+    ) =
+    map(x -> x[2], select(chans), typ=typ, bufsize=bufsize)
 
 abstract Transport
 
