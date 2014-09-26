@@ -10,8 +10,8 @@ end
 
 type Channel{T}
     isopen::Bool
-    ready_recv::Condition
-    ready_send::Condition
+    recv_blocker::Condition
+    send_blocker::Condition
     bufsize::Int
     buffer::Vector{T}
 end
@@ -24,56 +24,48 @@ close(c::Channel) = c.isopen = false
 isopen(c::Channel) = c.isopen
 
 function send(c::Channel, val)
-    # notify a blocked recv
     if !isopen(c)
         throw(ChannelClosedError())
     end
-    if c.bufsize == 0
-        # Beware: Races possible when actually multithreaded!
+
+    if length(c.buffer) < c.bufsize
         push!(c.buffer, val)
-        wait(c.ready_recv)
-    elseif length(c.buffer) < c.bufsize
-        push!(c.buffer, val)
+        notify(c.recv_blocker, all=false)
     else
-        if !isempty(c.ready_recv.waitq)
+        if !isempty(c.recv_blocker.waitq)
+            # if procs are already waiting to recv
             push!(c.buffer, val)
+	    notify(c.recv_blocker, all=false)
         else
-            # block until someone wants to read
+            # otherwise, block until someone wants to recv
             push!(c.buffer, val)
-            wait(c.ready_send)
+            wait(c.send_blocker)
+	    notify(c.recv_blocker, all=false)
         end
     end
-    notify(c.ready_recv, all=false)
 end
 
 function recv(c::Channel)
     # Read out if there is something in the buffer
-
     if length(c.buffer) > 0
         try
             v = shift!(c.buffer)
             # tell others that you have freed a buffer slot
-            notify(c.ready_send, all=false)
+            notify(c.send_blocker, all=false)
             return v
         catch
             # Continue and wait if cannot shift!
         end
     end
-
     # Or block till there is something
-    if length(c.buffer) == 0 && !isopen(c)
+    if !isopen(c)
         warn("waiting to receive from a closed channel!")
     end
 
-    if !isempty(c.ready_send.waitq)
-        v = shift!(c.buffer)
-        # tell others that you have freed a buffer slot
-        notify(c.ready_send, all=false)
-        return v
-    else
-        wait(c.ready_recv)
-        return shift!(c.buffer)
-    end
+    wait(c.recv_blocker)
+    v = shift!(c.buffer)
+    notify(c.send_blocker, all=false)
+    return v
 end
 
 typealias Selected{T} (Channel{T}, T)

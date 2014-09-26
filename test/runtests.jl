@@ -5,30 +5,35 @@ c1 = Channel(Int)
 c2 = Channel(Int)
 
 t1 = @async begin
-    @test recv(c1) == 3
-    send(c1, 4)
-
     sleep(0.5)
-    send(c2, 1)
+    for i=6:10
+        @test recv(c1) == i
+    end
+    for i=1:5
+        send(c1, i)
+    end
+
+    # time million writes
+    println("sending a million integers")
+    tic()
+    for i = 1:1000000
+        send(c2, i)
+    end
+    toc()
 end
 
 t2 = @async begin
-    send(c1, 3)
-    @test recv(c1) == 4
+    for i=6:10
+        send(c1, i)
+    end
+    for i=1:5
+        @test recv(c1) == i
+    end
 
-    # Blocked recv
-    tic()
-    @test recv(c2) == 1
-    dt = toc()
-    @test dt >= 0.5
-
-end
-sleep(1)
-
-function throw(t::Task)
-    if t.exception != nothing
-        rethrow(t.exception)
+    for i = 1:1000000
+        recv(c2)
     end
 end
 
-map(throw, [t1, t2])
+wait(t1)
+wait(t2)
